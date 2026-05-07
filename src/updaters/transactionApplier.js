@@ -43,27 +43,41 @@ export async function applyTransactionChanges(matchResults, { dryRun = true } = 
   return { applied, skipped, failed };
 }
 
-export async function snapshotTransactions(transactions) {
-  // Capture relevant fields before rules run so we can detect unexpected changes
+export function snapshotTransactions(transactions) {
   return new Map(
     transactions.map(txn => [
       txn.id,
-      { category: txn.category, notes: txn.notes, payee: txn.payee },
+      { category: txn.category ?? null, notes: txn.notes ?? null, payee: txn.payee ?? null },
     ])
   );
 }
 
-export function detectUnexpectedChanges(snapshot, appliedChanges, transactions) {
+export async function fetchAndVerifyUnexpected(snapshot, appliedChanges, accountIds, meta) {
+  // Re-fetch the transactions that were in scope, then compare against snapshot.
+  // Any field change on a transaction NOT in our applied set is unexpected.
   const expectedChangedIds = new Set(appliedChanges.map(c => c.txn.id));
   const unexpected = [];
 
-  for (const txn of transactions) {
-    const original = snapshot.get(txn.id);
-    if (!original) continue;
+  // Fetch a fresh copy of each affected account's transactions
+  const txnsById = new Map();
+  for (const accountId of accountIds) {
+    try {
+      const fresh = await api.getTransactions(accountId);
+      for (const t of fresh) txnsById.set(t.id, t);
+    } catch {
+      // If a single account fetch fails, skip it — don't abort the whole verification
+    }
+  }
+
+  for (const [id, original] of snapshot.entries()) {
+    const current = txnsById.get(id);
+    if (!current) continue; // transaction no longer exists — skip
 
     for (const field of ['category', 'notes', 'payee']) {
-      if (txn[field] !== original[field] && !expectedChangedIds.has(txn.id)) {
-        unexpected.push({ txn, field, originalValue: original[field], newValue: txn[field] });
+      const cur = current[field] ?? null;
+      const orig = original[field];
+      if (cur !== orig && !expectedChangedIds.has(id)) {
+        unexpected.push({ txn: current, field, originalValue: orig, newValue: cur });
       }
     }
   }

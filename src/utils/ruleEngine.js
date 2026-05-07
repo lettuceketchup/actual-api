@@ -123,7 +123,13 @@ export function evaluateCondition(condition, txn) {
 
   switch (field) {
     case 'imported_payee':
+      return evalStringOp(op, txn[field], value);
+
     case 'notes':
+      if (op === 'hasTags') {
+        const tags = extractTags(txn.notes);
+        return tags.includes(`#${String(value).toLowerCase().replace(/^#/, '')}`);
+      }
       return evalStringOp(op, txn[field], value);
 
     case 'payee':
@@ -183,10 +189,10 @@ export function simulateActions(rule, txn) {
         changes[action.field] = action.value;
         break;
       case 'prepend-notes':
-        changes.notes = `${action.value} ${txn.notes ?? ''}`.trim();
+        changes.notes = `${action.value} ${changes.notes ?? txn.notes ?? ''}`.trim();
         break;
       case 'append-notes':
-        changes.notes = `${txn.notes ?? ''} ${action.value}`.trim();
+        changes.notes = `${changes.notes ?? txn.notes ?? ''} ${action.value}`.trim();
         break;
       case 'link-schedule':
         changes.schedule = action.value?.id ?? action.value;
@@ -202,10 +208,10 @@ export function simulateActions(rule, txn) {
 
 // ── Stage-ordered rule application ────────────────────────────────────────────
 
-const STAGE_ORDER = { pre: 0, null: 1, post: 2 };
+const STAGE_ORDER = { pre: 0, post: 2 };
 
 function stageKey(stage) {
-  return STAGE_ORDER[stage] ?? STAGE_ORDER['null'];
+  return STAGE_ORDER[stage] ?? 1; // null/undefined → middle stage
 }
 
 export function applyRulesToTransaction(rules, txn) {

@@ -33,7 +33,7 @@ import { matchTransactionsToRules, summarizeMatchReport } from './analyzers/tran
 import { getAuditSuggestions, getGapSuggestions } from './analyzers/aiAdvisor.js';
 import { reviewProposals, confirmApply } from './ui/reviewer.js';
 import { applyProposals, buildUpdatedRuleSet } from './updaters/ruleApplier.js';
-import { applyTransactionChanges, snapshotTransactions } from './updaters/transactionApplier.js';
+import { applyTransactionChanges, snapshotTransactions, fetchAndVerifyUnexpected } from './updaters/transactionApplier.js';
 import { formatRule, formatAuditReport, formatConfirmationReport, formatTransaction } from './utils/formatter.js';
 import { runRulesAgainstAll } from './utils/ruleEngine.js';
 
@@ -275,31 +275,50 @@ async function cmdRun(opts) {
   console.log(chalk.bold('\nStep 4/4: Review & apply'));
 
   let currentRules = enrichedRules;
+  let applyResult = { created: [], updated: [], deleted: [], failed: [], rollbackLog: [] };
+  let ruleChangesApproved = false;
 
   if (allProposals.length === 0 && matchReport.fullyMatched.length === 0) {
     console.log(chalk.dim('  No rule proposals and no transactions covered by existing rules. Nothing to do.'));
     return;
   }
 
-  let applyResult = { created: [], updated: [], deleted: [], failed: [], rollbackLog: [] };
-
   if (allProposals.length > 0) {
-    const { approved } = await reviewProposals(allProposals, enrichedRules, meta);
+    // Deduplicate proposals targeting the same rule+type combination
+    const seen = new Set();
+    const deduped = allProposals.filter(p => {
+      const key = `${p.type}::${p.targetRuleId ?? 'new'}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    if (deduped.length < allProposals.length) {
+      console.log(chalk.dim(`  (${allProposals.length - deduped.length} duplicate proposal(s) removed)`));
+    }
+
+    const { approved } = await reviewProposals(deduped, enrichedRules, meta);
 
     if (approved.length > 0) {
       const ok = await confirmApply(approved, { dryRun: opts.dryRun });
       if (ok) {
         console.log('\nApplying rule changes...');
         applyResult = await applyProposals(approved, enrichedRules, { dryRun: opts.dryRun });
-        // Build updated rule list for running against transactions
+        ruleChangesApproved = true;
+        // Build updated + re-enriched rule list for running against transactions
         if (!opts.dryRun) {
-          currentRules = buildUpdatedRuleSet(enrichedRules, applyResult);
+          const rawUpdated = buildUpdatedRuleSet(enrichedRules, applyResult);
+          currentRules = enrichRules(rawUpdated, meta);
         }
       }
     }
   }
 
   // ── Run rules against uncategorized transactions ──
+  // If rule proposals exist but none were approved, confirm before running existing rules.
+  if (allProposals.length > 0 && !ruleChangesApproved) {
+    console.log(chalk.dim('\nNo rule changes approved. Running existing rules against uncategorized transactions.'));
+  }
+
   console.log('\nRunning rules against uncategorized transactions...');
   const { matched: txnMatches } = runRulesAgainstAll(currentRules, uncategorized);
 
@@ -318,12 +337,19 @@ async function cmdRun(opts) {
 
   const { applied: txnApplied } = await applyTransactionChanges(txnMatches, { dryRun: opts.dryRun });
 
-  // ── Confirmation report ──
-  const txnChanges = {
-    applied: txnApplied,
-    unexpected: [],
-  };
+  // ── Verify no unexpected changes (live mode only) ──
+  let unexpected = [];
+  if (!opts.dryRun && txnApplied.length > 0) {
+    console.log(chalk.dim('\nVerifying no unexpected changes...'));
+    const accountIds = [...new Set(uncategorized.map(t => t.account).filter(Boolean))];
+    unexpected = await fetchAndVerifyUnexpected(snapshot, txnApplied, accountIds, meta);
+    if (unexpected.length > 0) {
+      console.warn(chalk.red(`\n⚠ ${unexpected.length} unexpected change(s) detected — see report below.`));
+    }
+  }
 
+  // ── Confirmation report ──
+  const txnChanges = { applied: txnApplied, unexpected };
   console.log(formatConfirmationReport(applyResult, txnChanges, meta));
 }
 

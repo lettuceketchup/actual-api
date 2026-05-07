@@ -291,7 +291,7 @@ export async function getAuditSuggestions(enrichedRules, meta, config = {}) {
 
 export async function getGapSuggestions(unmatchedGroups, enrichedRules, meta, nearMisses = [], config = {}) {
   const knownRuleIds = new Set(enrichedRules.map(r => r.id));
-  const batchSize = 15;
+  const batchSize = parseInt(process.env.AI_MAX_RULES_PER_REQUEST ?? '15', 10);
   const batches = chunk(unmatchedGroups, batchSize);
   const allProposals = [];
 
